@@ -1,0 +1,83 @@
+name: 📥 Receive Repo Dispatch and Update List
+
+on:
+  # 1. Listen for the custom event sent by the contributing repositories.
+  repository_dispatch:
+    types: [repo-update]
+
+jobs:
+  update_master_file:
+    # Use the latest Ubuntu runner
+    runs-on: ubuntu-latest
+
+    # The token used here must be the one created by the central repo owner (DISPATCH_PAT),
+    # but we'll use a safer method for committing: the GITHUB_TOKEN for push,
+    # as long as the workflow is in the same repo as the commit target.
+    # However, since we are writing a file and committing, the default GITHUB_TOKEN
+    # is usually sufficient for writing to the SAME repository.
+    # If using the Central Repo's GITHUB_TOKEN fails for commit/push, replace
+    # it with your CROSS_REPO_PAT stored as a secret in this repo.
+    permissions:
+      contents: write # Required for checkout and for stefanzweifel/git-auto-commit-action
+
+    steps:
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
+
+      # --- Data Processing Step ---
+      # This step captures the incoming data and updates the list file (e.g., list.json)
+      - name: ⚙️ Process Payload and Update Data File
+        id: process_data
+        run: |
+          # 2. Extract the payload data into shell variables
+          REPO_NAME='${{ github.event.client_payload.repo_name }}'
+          ENTITY_TYPE='${{ github.event.client_payload.entity_type }}' # e.g., 'issue', 'pr', 'release'
+          TITLE='${{ github.event.client_payload.title }}'
+          NUMBER='${{ github.event.client_payload.number }}'
+          ASSIGNEE='${{ github.event.client_payload.assignee }}' # Can be null/empty
+          STATUS='${{ github.event.client_payload.status }}' # e.g., 'open', 'closed', 'merged', 'published'
+
+          # Define the target file name
+          DATA_FILE="master_list.json"
+
+          # --- Create or Read existing file ---
+          if [ -f "$DATA_FILE" ]; then
+            CONTENT=$(cat $DATA_FILE)
+          else
+            # Initialize with an empty JSON array if the file doesn't exist
+            CONTENT="[]"
+          fi
+
+          # --- Update or Add Entry using jq ---
+          # 'jq' is pre-installed on GitHub runners and is excellent for JSON manipulation.
+          
+          # Construct the new or updated entry
+          NEW_ENTRY='{"repo": "'"$REPO_NAME"'", "type": "'"$ENTITY_TYPE"'", "title": "'"$TITLE"'", "number": '"$NUMBER"', "assignee": "'"$ASSIGNEE"'", "status": "'"$STATUS"'", "updated_at": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"}'
+          
+          # Find the index of an existing entry for this item (by repo and number)
+          INDEX=$(echo $CONTENT | jq -r 'map(select(.repo == "'"$REPO_NAME"'" and .number == '"$NUMBER"' )) | .[0]? // "" | .number? // "not_found"')
+
+          if [ "$INDEX" != "not_found" ]; then
+            # If the entry exists, update it by finding its index and replacing the value
+            UPDATED_CONTENT=$(echo $CONTENT | jq --argjson new_entry "$NEW_ENTRY" 'map(if (.repo == "'"$REPO_NAME"'" and .number == '"$NUMBER"') then $new_entry else . end)')
+          else
+            # If the entry does not exist, append the new entry
+            UPDATED_CONTENT=$(echo $CONTENT | jq --argjson new_entry "$NEW_ENTRY" '. + [$new_entry]')
+          fi
+
+          # Write the updated content back to the file
+          echo "$UPDATED_CONTENT" > $DATA_FILE
+          
+          # For visibility in logs
+          echo "Updated list. The file is ready to be committed."
+
+      # --- Commit and Push Step ---
+      - name: ⬆️ Commit and Push Updated List
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "CI: Update master list for ${{ github.event.client_payload.repo_name }} #${{ github.event.client_payload.number }}"
+          # The default token works because we are pushing to the same repository
+          # where the workflow is running, and the 'contents: write' permission is granted.
+          # If you run into permission issues, set token: ${{ secrets.CROSS_REPO_PAT }} 
+          # (assuming you stored the PAT in the Central Repo as well).
+          token: ${{ secrets.GITHUB_TOKEN }}
